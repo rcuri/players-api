@@ -1,0 +1,121 @@
+org: rcuriel
+app: players-api
+service: players-api
+frameworkVersion: '3.32.2'
+plugins:
+  - serverless-python-requirements
+  - serverless-offline
+provider:
+  name: aws
+  stage: ${opt:stage, 'dev'}
+  region: us-east-1
+  versionFunctions: false
+  runtime: python3.8    
+  httpApi:
+    cors:
+      allowedOrigins:
+        - https://rcuri.github.io
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+      allowedMethods:
+        - GET
+      allowCredentials: false
+  environment:
+    POSTGRES_PROD_PASSWORD: ${param:POSTGRES_PROD_PASSWORD}
+    POSTGRES_PROD_DB: ${param:POSTGRES_PROD_DB}
+    POSTGRES_PROD_HOST: ${param:POSTGRES_PROD_HOST}
+    POSTGRES_PROD_USERNAME: ${param:POSTGRES_PROD_USERNAME}
+
+functions:
+  getPlayerByName:
+    handler: functions/get_player_by_name/handler.handler
+    role: getPlayerByNameLambdaFunctionRole
+    events:
+      - httpApi:
+          path: /players/{player_name}
+          method: GET
+custom:
+  pythonRequirements:
+    dockerizePip: true
+resources:
+  Resources:
+    getPlayerByNameLambdaFunctionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                - lambda.amazonaws.com
+              Action:
+              - sts:AssumeRole
+        Path: "/"
+        Policies:
+        - PolicyName: "GetPlayerByNameLambdaPolicy"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action: 
+                - logs:CreateLogStream
+                - logs:CreateLogGroup
+              Resource: !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:*'
+            - Effect: Allow
+              Action:
+                - logs:PutLogEvents 
+              Resource: 
+                - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:*:log-stream:*'        
+
+    apiGateway:
+      Type: AWS::ApiGatewayV2::Api
+      Properties:
+        ProtocolType: HTTP  
+        Name: APIGateway
+    
+    apiGwIntegration:
+      Type: AWS::ApiGatewayV2::Integration
+      Properties: 
+        ApiId: !Ref apiGateway
+        IntegrationType: AWS_PROXY
+        IntegrationMethod: "POST"
+        IntegrationUri: !Sub
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations
+            - lambdaArn: 
+                Fn::GetAtt:
+                  - GetPlayerByNameLambdaFunction
+                  - Arn
+        PayloadFormatVersion: '2.0'
+
+    apiGwStage:
+      Type: AWS::ApiGatewayV2::Stage
+      Properties:
+        StageName: $default
+        AutoDeploy: true
+        ApiId: !Ref apiGateway
+        AccessLogSettings:
+          DestinationArn: !GetAtt apiLogGroup.Arn
+          Format: >-
+            {"requestId":"$context.requestId", "ip": "$context.identity.sourceIp","caller":"$context.identity.caller","user":"$context.identity.user","requestTime":"$context.requestTime","routeKey":"$context.routeKey","status":"$context.status"}
+
+    apiLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties: 
+        LogGroupName: 'HTTPApiAccessLogs'
+        RetentionInDays: "30"
+
+    getPlayerByNameLambdaPermission:
+      Type: 'AWS::Lambda::Permission'
+      Properties:
+        Action: 'lambda:InvokeFunction'
+        Principal: apigateway.amazonaws.com
+        FunctionName: !Ref GetPlayerByNameLambdaFunction
+        SourceArn:
+          'Fn::Sub':
+            - >-
+              arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/*
+            - __Stage__: '*'
+              __ApiId__:
+                Ref: apiGateway
